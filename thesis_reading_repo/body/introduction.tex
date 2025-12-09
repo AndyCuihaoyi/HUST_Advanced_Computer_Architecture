@@ -16,14 +16,8 @@ DRAM与慢速层级的CXL内存设备结合使用。通过分析先前的分层�
 \subsection{引言}
 现代应用对内存容量和带宽的需求日益增加。单个服务器内存容量和内存成本都成为限制，近十年DRAM密度的发展也相对缓慢。以CXL为基础的分层内存架构是解决上述问题的可靠方案。更大容量更低价格的CXL内存与本地DRAM相结合，能耗更低使用效率更高。另一方面，CXL内存的延迟和带宽表现不如本地DRAM，所以要将高速层级的DRAM和低速层级的CXL Memory巧妙结合。
 
-然而，实现高性能分层颇具挑战。我们对大内存工作负载进行了分析，并得出两个观察结果：（1）实际工作负载通常表现出倾斜但动态变化的数据热度分布，如图\ref{fig:data_changes}所示；（2）管理数据访问统计信息可能带来显著开销。理想的分层系统应满足三个要求：（1）通过将最热数据放置在快速层级内存中，准确捕获热数据集合；（2）快速适应热度分布的变化；（3）最小化分层元数据开销。
+然而，实现高性能分层颇具挑战。我们对大内存工作负载进行了分析，并得出两个观察结果：（1）实际工作负载通常表现出倾斜但动态变化的数据热度分布；（2）管理数据访问统计信息可能带来显著开销。理想的分层系统应满足三个要求：（1）通过将最热数据放置在快速层级内存中，准确捕获热数据集合；（2）快速适应热度分布的变化；（3）最小化分层元数据开销。
 
-\begin{figure}[htbp]  % 尝试将浮动元素放在页面合适位置
-\centering
-\includegraphics[width=0.8\textwidth]{images/data_changes.png}
-\caption{负载热度分布变化}
-\label{fig:data_changes}
-\end{figure}
 
 然而，现有系统无法满足全部三个要求。一类工作采用基于频率的分层，通过存储每个页面的访问计数来构建热度直方图。基于此直方图，分层系统将最热页面置于快速层级，满足要求1。另一类工作是基于近期性的分层，它使用访问新近性来近似数据热度。此类系统使用连续缺页之间的时间等指标来做出数据放置决策。基于近期性的系统满足要求3，因为与频率对应项相比开销更小。然而，基于近期性的系统无法满足要求1也不满足要求2。
 
@@ -38,90 +32,77 @@ DRAM与慢速层级的CXL内存设备结合使用。通过分析先前的分层�
 
 \subsection{背景和动机}
 
+\subsubsection{CXL-Enabled Memory Tiering Systems}
+CXL技术定位：Compute Express Link (CXL) 是运行在PCIe物理层上的开放行业标准互连协议，旨在支持未来数据中心的异构计算和内存能力。
+
+核心特性与权衡：
+\begin{itemize}
+    \item 优势：CXL连接的内存（如DDR4/5）具有字节可寻址性，可直接被CPU访问，支持标准内存分配接口；相比本地DRAM，容量更大、成本/GB更低（CXL总线功耗更低、形态更紧凑）
+    \item 劣势：延迟高50-100ns，带宽仅为本地DRAM的20\%-70\%分层目标：精准识别热/冷数据，将热数据置于本地DRAM（快速层），冷数据置于CXL内存（慢速层）
+\end{itemize}
+
+\subsubsection{Dynamic Data Hotness Distribution}
+通过分析Meta、Twitter等生产环境，揭示大型内存工作负载的两大核心特征：
+\begin{enumerate}          % 外层：有序列表（数字）
+  \item 访问倾斜性（Skewed Distribution）
+    \begin{itemize}        % 内层：无序列表（圆点）
+      \item 内存缓存普遍遵循Zipf或幂律分布，80\%访问集中在最热门的10\%数据
+      \item Meta对象存储缓存的实证数据验证了此规律
+    \end{itemize}
+  \item 动态变化性（Dynamic Variation）
+\begin{itemize}        % 内层：无序列表（圆点）
+      \item 时间尺度极短：热数据可在几分钟内变冷。Meta报告显示，50\%热门对象在10分钟后不再热门
+      \item 空间影响显著：图2\ref{fig:data_changes}显示，在PageRank和XGBoost中，超过90\%和50\%的初始热页面在5分钟后失去热度
+      \item TTL机制：Twitter生产缓存普遍采用分钟级生存时间，对象过期后即从缓存移除
+    \end{itemize}
+\end{enumerate}
+
+\begin{figure}[htbp]  % 尝试将浮动元素放在页面合适位置
+\centering
+\includegraphics[width=0.8\textwidth]{images/data_changes.png}
+\caption{负载热度分布变化}
+\label{fig:data_changes}
+\end{figure}
+
+\subsubsection{Prior Tiering Systems}
+本节批判性分析现有系统在三大核心要求上的不足。提出理想分层系统的三大要求：（1）准确捕获热数据：将最热数据精准放入快速层；（2）快速适应热度变化：及时识别新晋热/冷页面；（3）最小化元数据开销：降低内存和缓存资源消耗。
+\begin{enumerate}  
+    \item 确捕获热数据（Requirement 1）:现有频率类系统（如Memtis）通过维护访问频率直方图，基本满足此要求。
+    \item 适应变化的热度分布（Requirement 2）
+        \begin{itemize}
+            \item 基于频率的系统（如Memtis）无法快速适应热度变化，需等待访问计数更新。EMA是滞后指标，图\ref{fig:frequency_based_adaptation1}显示某页面停止访问后，EMA得分需9分钟才降至阈值以下;减小冷却周期C可提升适应性，但会破坏热度分布准确性。
+            \begin{figure}[htbp]  % 尝试将浮动元素放在页面合适位置
+            \centering
+            \includegraphics[width=\textwidth]{images/fre_1.png}
+            \caption{基于频率的系统适应热度分布变化}
+            \label{fig:frequency_based_adaptation1}
+            \end{figure}
+            \item 基于近期性的系统（如AutoNUMA、TPP）准确性缺失,仅考虑短时窗口，易将冷页面误判为热页面通过时间间隔等指标近似热度，但无法捕获长期访问模式,如图\ref{fig:frequency_based_adaptation2}。
+            \begin{figure}[htbp]  % 尝试将浮动元素放在页面合适位置
+            \centering
+            \includegraphics[width=0.9\textwidth]{images/fre_2.png}
+            \caption{基于新近度的系统适应热度分布变化}
+            \label{fig:frequency_based_adaptation2}
+            \end{figure}
+        \end{itemize}
+    \item 分层元数据开销（Requirement 3）
+        \begin{itemize}
+            \item 内存开销：每个4KB页面分配16B元数据，1TB服务器产生3.9GB开销，是Linux内核启动内存的近10倍;10万台AWS t2.nano实例的100GB额外内存开销，每年浪费3180万美元;
+            \item 缓存开销：硬件计数器采样需频繁更新元数据，导致大量缓存未命中;图5显示Memtis的分层活动平均消耗L1缓存未命中的9\%和LLC未命中的18\%（常规页面）
+        \end{itemize}
+\end{enumerate}
+
 \subsection{混合层级关键思想}
+本章提出 HybridTier 的三个关键创新，分别针对性解决第二章指出的三大缺陷。
+
+适应动态热度分布，为每个页面同时维护 两个独立指标——频率（长期访问历史，分钟到小时级）和动量（短期访问强度，秒级）。晋升时，只要频率或动量任一指标高即提升页面，快速响应新晋热页；降级时采用"二次机会"策略，避免历史热页因短暂冷却被错误淘汰。在CacheLib负载中，适应新分布的速度比Memtis快3.2倍。
+
+降低元数据内存开销，用概率性数据结构替代精确数据结构——采用 Counting Bloom Filter (CBF) 追踪访问计数。每个计数器仅4位（最大计数值15），因为访问≥15次的页面都应置于快速层，无需精确区分。内存开销比精确哈希表降低4.0--7.8倍（128MB CBF即可覆盖50万页面，误判率<0.1\%）。
+
+减少缓存开销，采用 Blocked CBF，强制同一页面的k个计数器位于同一64B缓存行，确保每次查询最多1次缓存未命中。Memtis每页16B元数据 → 每缓存行仅存4页；HybridTier每缓存行存32页，且单级结构避免指针解引用。Tiering活动的缓存未命中减少1.7--3.5倍。
 
 \subsection{混合层级设计}
 
 \subsection{实验设计}
 
 \subsection{系统评估}
-
-\subsubsection{研究背景与趋势}
-\begin{enumerate}
-    \item 参考文献必须全部在论文正文中按顺序引用
-    \item 不得在标题处进行引用，引用出现在标点之前。
-    \item 可以在引用处右上角加标注进行引用，也可以直接在正文中用“文献[3]指出……”这样的话语进行引用
-    \item 参考文献在后面的【参考文献】中排列顺序按照在论文中第一次引用的先后顺序排列
-    \item 多篇参考文献群引不超过3篇，可使用如下风格:[1,2,3]、[1][2][3]
-\end{enumerate}
-
-\subsubsection{面临的问题和挑战}
-
-\subsubsection{课题目的与意义}
-
-阐述最终的输出成果能够达到什么目标，比如什么样的性能或者提供什么样的功能之类。
-
-\subsection{国内外研究现状}
-通过大量文献阅读，对所研究内容进行综述，较为详细的说明研究内容的国内外现状，
-建议按照时间轴分阶段说明或者按照原理/机制分类别说明，不论哪种方式，
-都要对每个阶段/每个类别的工作原理、机制、试图解决的问题、解决了的问题和存在的不足进行阐述和分析，
-该部分篇幅在3-4页为宜
-
-一次引用建议不要超过三篇文献，文献引用按照：递增顺序、全部引用的原则进行引用
-
-\subsection{论文的主要内容与结构}
-\subsubsection{论文的主要内容}
-
-\subsubsection{论文结构}
-本文的主要内容如下：
-
-第一章...
-
-第二章...
-
-\dots
-
-第六章...
-
-
-% 插入图片，如图\ref{fig:fig1}所示：
-
-% \cfig{fig1}{0.5}{插入图片示例}
-
-% 公式，如公式\ref{eq:1}所示：
-% \begin{equation}
-%     \label{eq:1}
-%     f_2 = f_v + f_a + f_{\omega}
-% \end{equation}
-
-% 列表，如\ref{chart:1}所示：
-% \begin{table}[!ht]
-%     \centering
-%     \caption{歪比巴伯}
-%     \label{chart:1}
-%     \begin{tabular}{ccc}
-%     \toprule
-%         A & B & C  \\ \midrule
-%         I & 1 & 2  \\ 
-%         II & 3 & 4 \\ \bottomrule
-%     \end{tabular}
-% \end{table}
-
-% 还可以添加算法\ref{al:1}：
-% \begin{algorithm}[ht]
-%     \caption{123}\label{al:1}
-%     \begin{algorithmic}[1]
-%         \Require a
-% 			\Ensure b
-%             \State v
-% 			\While{q}
-%             \State 1
-% 			\If {d}
-%             \State 3
-% 			\State \Return dd
-%             \Else
-%             \State 2
-%             \EndIf	
-% 			\EndWhile
-%     \end{algorithmic}
-% \end{algorithm}
