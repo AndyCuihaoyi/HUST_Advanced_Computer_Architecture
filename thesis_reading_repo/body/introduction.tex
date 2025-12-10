@@ -269,6 +269,105 @@ Relative Reduction & 2.3X & 1.7X & 2.6X & 3.6X & 5.9X & 3.3X \\
   \label{fig:fre_tracker}
   \end{figure}
   \item 计数布隆过滤器（Counting Bloom Filter）证明了 HybridTier 将每个访问计数器的大小限制为 4 位的设计决策是合理的，因为所有工作负载中超过计数器阈值的页面很少。表 5 显示，64 MB 的 CBF 在 与哈希表进行比较时，超过 99.6\% 的迁移决策是准确的。频率和动量追踪器都使用 CBF 实现。实际上，HybridTier 为动量 CBF 分配的内存比频率 CBF 少 128 倍。
-  \item 分块布隆过滤器（Blocked CBF）k 个计数器可以映射到缓存行内的任何计数器。例如，图 8 显示每个缓存行包含 8 个计数器槽。实际上，4 位 CBF 的每个缓存行包含 128 个计数器槽。与标准 CBF 相比，分块 CBF 有略高的误报率 [61, 63]。然而，在实践中，我们发现性能收益是有利的权衡。
-
+\begin{table}[h]
+\centering
+\caption{布隆过滤器准确率测试}
+\begin{tabular}{|l|ccccc|}
+\hline
+CBF size (MB) & 256    & 128    & 64     & 32     & 8      \\ \hline
+Accuracy      & 99.72\% & 99.65\% & 99.62\% & 99.42\% & 96.92\% \\ \hline
+\end{tabular}
+\end{table}
+  \item 分块布隆过滤器（Blocked CBF）k 个计数器可以映射到缓存行内的任何计数器。每个缓存行包含 8 个计数器槽。实际上，4 位 CBF 的每个缓存行包含 128 个计数器槽。与标准 CBF 相比，分块 CBF 有略高的误报率 [61, 63]。然而，在实践中，我们发现性能收益是有利的权衡。
+\item 一项敏感性研究，以了解动量阈值对 HybridTier 性能的影响，相关结果如图 17 \ref{fig:momentum_sensitivity}所示。由于社交网络工作负载的热门数据集规模更大（见图 16），导致快速层级内存资源更为稀缺，因此其性能表现不如内容分发网络（CDN）。
+将动量阈值降低到 3 以下会对 HybridTier 的性能产生负面影响，因为这样可能会将仅被访问过几次的冷页面错误地提升至快速层级。而对于我们所评估的工作负载而言，将动量阈值提高到 3 以上并不会显著改善性能。如果默认的动量阈值对于特定应用而言并非最优设置，HybridTier 允许用户调整该阈值的数值以提升性能。
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/momentum_sensitivity.png}
+  \caption{动量阈值敏感性测试}
+  \label{fig:momentum_sensitivity}
+  \end{figure}
 \end{itemize}
+
+\subsection{讨论、相关工作及结论}
+\subsubsection{讨论（Discussions）}
+\begin{enumerate}[itemsep=6pt]
+    \item \textbf{用户空间与内核空间分层对比}
+    \begin{itemize}[label=-]
+        \item HybridTier采用用户空间实现，核心优势为灵活性，该优势在现有内存分层系统（如HeMem）及软件系统（用户空间网络、文件系统）中均获认可；
+        \item 核心设计原则（频率-动量指标、概率性访问跟踪）具备通用性，可迁移至内核空间实现，不受当前部署模式限制。
+    \end{itemize}
+    
+    \item \textbf{全局内存分层支持方案}
+    \begin{itemize}[label=-]
+        \item 架构设计：通过中央HybridTier控制器协调各独立实例，构建全局内存分层体系，适用于多租户虚拟机、共存应用场景；
+        \item 数据交互：各实例向中央控制器上报本地冷热数据，由控制器统一制定全局数据晋升/降级决策，优化全局资源分配。
+    \end{itemize}
+    
+    \item \textbf{一次性访问模式处理}
+    \begin{itemize}[label=-]
+        \item 针对扫描、指针追踪等一次性访问应用，可调整动量热度阈值参数；
+        \item 权衡关系：提高阈值可减少快速层内存污染，但降低对热度变化的适应性，需结合应用场景平衡调整。
+    \end{itemize}
+    
+    \item \textbf{可配置参数选择}
+    \begin{itemize}[label=-]
+        \item 频率热度阈值：借鉴Memtis方法，依据热度分布自动调整，无需人工干预；
+        \item 动量热度阈值：经验性设为3（在评估 workload 中效果优异），支持用户根据特定应用灵活修改。
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{相关工作（Related Works）}
+\begin{enumerate}[itemsep=6pt]
+    \item \textbf{内存分层系统}
+    \begin{itemize}[label=-]
+        \item 慢层内存类型与部署：慢层可采用固态硬盘、持久化内存；部署分本地（与快层同服务器，如AutoNUMA、TPP）与远程（如AIFM，需网络支持）；
+        \item 可编程性分类：
+        \begin{itemize}[label=*]
+            \item 应用透明型：无需修改代码（如AutoNUMA、TPP、Memtis、HybridTier），降低接入成本；
+            \item 应用依赖型：需剖析或修改代码（如memkind、SMDK、Unimem），虽利用应用语义，但增加开发复杂度。
+        \end{itemize}
+        \item 关键对比系统：
+        \begin{itemize}[label=*]
+            \item AutoNUMA/TPP：基于近期访问的CXL分层系统，存在冷热数据误分类问题；
+            \item Memtis/HeMem：Memtis支持持久化内存与CXL，HeMem聚焦持久化内存页级频率分层，二者均有元数据开销高或适应性不足问题；
+            \item 其他系统：部分依赖硬件加速或聚焦特定优化（如Memstrata的多VM分配、NOMAD的页面迁移优化），HybridTier无需硬件/应用修改，可与其互补集成。
+        \end{itemize}
+    \end{itemize}
+    
+    \item \textbf{通用缓存算法}
+    \begin{itemize}[label=-]
+        \item 基础算法：LRU（基于访问近期性）、CLOCK（LRU近似），均无法兼顾频率与近期性；
+        \item 混合缓存算法：
+        \begin{itemize}[label=*]
+            \item LRFU：加权平均整合近期性与频率，调整衰减因子可切换策略，但无法独立精准跟踪两类指标；
+            \item ARC：双LRU列表区分单次/多次访问项，不维护频率计数，难以区分热/温数据，资源受限场景性能受限。
+        \end{itemize}
+        \item HybridTier优势：通过独立计数器分别跟踪频率与近期性，解决现有混合算法的跟踪精度问题。
+    \end{itemize}
+    
+    \item \textbf{近似数据结构}
+    \begin{itemize}[label=-]
+        \item 应用领域：概率性数据结构（如布隆过滤器）已用于数据库、内存缓存、网络通信，优化存储与查询效率；
+        \item HybridTier创新：首次将计数布隆过滤器（CBF）应用于内存分层，结合CBF特性设计高效晋升/降级机制与迁移策略，实现细粒度频率分层。
+    \end{itemize}
+    
+    \item \textbf{离散内存系统}
+    \begin{itemize}[label=-]
+        \item 核心目标：通过远程服务器扩展内存容量，需将热数据放置本地快层以减少延迟；
+        \item 与HybridTier关系：技术方向正交，目标服务器可在HybridTier管理本地CXL内存基础上，通过离散系统进一步扩展容量，形成多层级管理体系。
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{结论（Conclusion）}
+\begin{enumerate}[itemsep=6pt]
+    \item \textbf{HybridTier核心定位}：提出具备自适应性与轻量级的分层内存系统，解决现有方案在适应性、元数据开销方面的关键问题，满足现代 workload 对大内存容量与高性能的双重需求。
+    
+    \item \textbf{核心技术亮点}
+    \begin{itemize}[label=-]
+        \item 双指标跟踪：同时跟踪长期访问频率与短期访问动量，快速适应动态访问分布，精准识别冷热数据变化，规避传统单指标局限性；
+        \item 低开销优化：采用概率性访问跟踪（计数布隆过滤器），大幅降低元数据的内存开销与缓存开销，兼顾性能与资源效率，适合数据中心大规模部署。
+    \end{itemize}
+    
+    \item \textbf{性能优势总结}：在多 workload 与内存配置下，HybridTier性能优于主流分层系统（平均提升19\%，最高达91\%），同时降低内存开销（2.0-7.8倍）与缓存开销（1.7-3.5倍），验证了其实用性与高效性，为CXL内存分层技术提供可靠解决方案。
+\end{enumerate}
