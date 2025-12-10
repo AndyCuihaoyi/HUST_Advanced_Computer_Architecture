@@ -101,8 +101,174 @@ CXL技术定位：Compute Express Link (CXL) 是运行在PCIe物理层上的开�
 
 减少缓存开销，采用 Blocked CBF，强制同一页面的k个计数器位于同一64B缓存行，确保每次查询最多1次缓存未命中。Memtis每页16B元数据 → 每缓存行仅存4页；HybridTier每缓存行存32页，且单级结构避免指针解引用。Tiering活动的缓存未命中减少1.7--3.5倍。
 
-\subsection{混合层级设计}
+\subsection{HybridTier混合层级设计}
 
+\subsubsection{HybridTier工作流}
+HybridTier被部署在一个单独的用户线程中，不需要应用修改或内核补丁。工作流如下：
+\begin{enumerate}
+  \item HybridTier动态透明地连接到运行的应用中，不需要重新编译应用；
+  \item Intel PEBS 或 AMD IBS 以 ≈100 kHz 频率产生硬件事件，每条事件包含虚拟地址和本地 DRAM or CXL 标识；
+  \item 更新时用双 CBF 计数器追踪访问频率和动量，跟踪误差控制：p=0.001，4-bit 计数器最大 15，超过不再细分（热页足够热即可）；
+  \item 根据记录做出迁移决策；
+  \item 最后从两层内存中发起迁移调动。
+\end{enumerate}
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/workflow.png}
+  \caption{HybridTier工作流}
+  \label{fig:workflow}
+  \end{figure}
+\subsubsection{计数布隆过滤器设计}
+在 HybridTier 里，Frequency-CBF 与 Momentum-CBF 的“计数器数目”是 同一份公式算出来的理论值，但 实际分配的位数组大小 可以按需截断，因为两条 CBF 的 冷却速度不同 导致 有效页数不同。实际部署时动量 CBF 可截断 128×，因为秒级冷却让它只追踪 当前瞬时热点，而频率 CBF 要保留 全部历史热度。
+\begin{table}[htbp]
+\centering
+\caption{Counting Bloom Filter (CBF) 关键参数与结果汇总}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{项目} & \textbf{数值 / 公式} \\ \midrule
+哈希函数数 $k$ & 4 \\
+计数器位宽 & 4 bit (最大 15) \\
+目标误判率 $p$ & 0.001 \\
+每页计数器期望 $r$ & $\displaystyle -\frac{k}{\ln\!\bigl(1-e^{\ln p/k}\bigr)} \approx 9.6$ \\
+位数组大小 $m$ & $\displaystyle \lceil n\cdot r \rceil$ \quad ($n$=快层页数) \\
+64 B 缓存行槽数 & 128 × 4-bit \\
+查询 LLC miss & $\leq 1$（Blocked-CBF） \\
+实测决策正确率 & 99.6 \%（64 MB CBF） \\
+Frequency-CBF 内存 & $\approx 4.8$ MB（1 M 页） \\
+Momentum-CBF 内存 & $\approx 0.037$ MB（比频率计数器少128 x ） \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsubsection{页面迁移策略}
+\begin{itemize}
+  \item 晋升（Promotion）每采一页 → 双CBF计数更新 → 按“频率/动量”矩阵即时判断；10万样本批处理后一次性系统调用批量晋升。
+  \item 降级（Demotion）快层空闲低于水位时，线性扫描页表，立即降“双低”页；对“高频率+低动量”页打Second-Chance标签，1分钟后复查未再升温即降。
+\end{itemize}
+
+\subsubsection{大粒度页面支持}
+启用 THP 后，HybridTier 以 2 MB 粒度追踪/迁移，把 CBF 计数器升至 16 bit 防止溢出，同时元素总数 ↓512×，最终元数据内存 再省 128×，性能与 4 KB 页持平。
 \subsection{实验设计}
-
+\subsubsection{CXL 设备部署}
+CXL真实设备稀缺，所以用双路 NUMA 节点模拟 CXL，实测延迟 124 ns、带宽 34 GB/s（≈ CXL 1.1 延迟）16 核 Xeon 4314 × 2，每节点 512 GB DDR4。
+\subsubsection{对比方案和实验配置}
+\begin{table}[htbp]
+\centering
+\caption{对比基线一览}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{系统} & \textbf{算法类型} & \textbf{备注} \\ \midrule
+AutoNUMA & 新近度 & Linux 原生，MGLRU 开启 \\
+TPP & 新近度 & Meta 开源，透明页放置 \\
+Memtis & 频率 & 频率直方图 + 冷却，**主要对标** \\
+ARC & 混合 LRU | 自调参双链表，缓存策略 |
+TwoQ | 混合 LRU | 两次队列区分“仅一次”与“多次” |
+HybridTier | 频率+动量 | 本文方案，双指标+CBF \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsubsection{工作负载}
+\begin{table}[htbp]
+\centering
+\caption{实验工作负载与数据规模}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Application} & \textbf{Input} & \textbf{Footprint} \\ \midrule
+Content-delivery network & CacheLib generator & 267 GB \\
+Social-graph & Kronecker graph & 335 GB \\
+Breadth-first search (BFS) & \multirow{3}{*}{Uniform random graph} & \multirow{3}{*}{335 GB} \\
+Connected components (CC) & & \\
+Page Rank (PR) & & \\
+SPEC CPU 2017 & 603.bwaves  & 150 GB \\
+& 654.roms  & 150 GB \\
+Silo & YCSB-C  & 208 GB \\
+XGBoost  & Criteo Click Logs & 248 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
 \subsection{系统评估}
+\subsubsection{Regular-Page 端到端性能}
+快层 : 慢层 = 1:16 / 1:8 / 1:4（慢层固定 512 GB）。如图\ref{fig:regular_performance}和其他五个策略相比，HybridTier 在所有比例下均表现最佳，平均提升 19\%（几何均值）。CacheLib：延迟 −18 \%，吞吐 +23 \%；1:16 就能打平别人 1:8。
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/regular_test.png}
+  \caption{Regular-Page 端到端性能}
+  \label{fig:regular_performance}
+  \end{figure}
+
+  图 11 \ref{fig:regular_performance2}展示了 HybridTier 相对于仅使用快层内存（即全 DRAM）基线的性能归一化结果，这代表了内存分层系统的性能上限。在 1:16、1:8 和 1:4 的内存配置下，HybridTier 平均仅比全快层内存慢 14\%、9\% 和 6\%。
+    \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/regular_test2.png}
+  \caption{Regular-Page 快速层归一化性能}
+  \label{fig:regular_performance2}
+  \end{figure}
+
+\subsubsection{Huge-Page 端到端性能}
+为了评估 HybridTier 在巨页（huge pages）模式下的性能，我们在所有工作负载上与其对比 Memtis。图 12 \ref{fig:huge_performance} 显示，在 1:8 和 1:4 配置下，HybridTier 平均比 Memtis 分别高出 9\% 和 11\%，而在 1:16 配置下两者表现相当。HybridTier 在 CacheLib social-graph、BFS 和 Page Rank 工作负载上相对 Memtis 的性能提升最为显著。
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/huge_test.png}
+  \caption{Huge-Page 端到端性能}
+  \label{fig:huge_performance}
+  \end{figure}
+
+\subsubsection{详细对比Memtis测试}
+\begin{itemize}
+  \item 对动态分布适应性测试：在 CacheLib 工作负载中，HybridTier 适应新分布的速度是 Memtis 的 3.2 倍。
+  \begin{table}[htbp]
+\centering
+\caption{负载适应性测试}
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+ & \multicolumn{3}{c|}{\textbf{CDN}} & \multicolumn{3}{c|}{\textbf{Social-graph}} \\
+\cline{2-7}
+ & \textbf{1:16} & \textbf{1:8} & \textbf{1:4} & \textbf{1:16} & \textbf{1:8} & \textbf{1:4} \\
+\hline
+Memtis & $>60$ & 42.6 & $>60$ & 34.2 & $>60$ & 29.6 \\
+HybridTier & 25.6 & 25.2 & 23.4 & 9.6 & 10.1 & 8.9 \\
+Relative Reduction & 2.3X & 1.7X & 2.6X & 3.6X & 5.9X & 3.3X \\
+\hline
+\end{tabular}
+\end{table}
+
+\item 平均而言，HybridTier 比 Memtis 少产生了 4.6 倍的元数据开销。由于 HybridTier 的元数据大小随着快层内存大小的缩放而缩放，因此在较低的快层内存大小下实现了更大的内存节省。另一方面，Memtis 的元数据开销与总内存容量成比例缩放，因此在我们设置中保持不变。
+\begin{table}[htbp]
+\centering
+\caption{元数据内存开销测试}
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{Ratio} & \textbf{Mentis} & \textbf{HybridTier} & \textbf{Relative Reduction} \\
+\hline
+1:16 & 0.39\% & 0.050\% & 7.8X \\
+1:8 & 0.39\% & 0.097\% & 4.0X \\
+1:4 & 0.39\% & 0.192\% & 2.0X \\
+\hline
+\end{tabular}
+\end{table}
+\item 缓存开销测试：在常规和大页模式下，HybridTier 平均产生了总缓存未命中数的 5\% 和 4\%。总体上，使用常规页时，HybridTier 减少了 1.7 倍和 1.8 倍的 L1 和 LLC 缓存未命中数，而在大页模式下减少了 3.2 倍和 3.5 倍。图 14 进一步分解了在常规页下采用 4 位 CBF 和分块 CBF 的影响。使用标准 CBF（HybridTier-CBF）适度减少了缓存未命中数 12\% 至 36\%，应用分块 CBF（HybridTier-bCBF）进一步减少了 31\% 至 72\%。得出结论，两种优化都是有效的，而分块 CBF 提供了更大的减少。
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/cache_test1.png}
+  \caption{Cache Miss 比较}
+  \label{fig:cache_performance1}
+  \end{figure}
+    \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/cache_test2.png}
+  \caption{Cache Miss分段延迟}
+  \label{fig:cache_performance2}
+  \end{figure}
+\end{itemize}
+\subsubsection{理解 HybridTier 性能}
+\begin{itemize}
+  \item 频率-动量追踪（Frequency-Momentum Tracking）同时追踪频率和动量可以最有效地处理 CacheLib 和 XGBoost 工作负载，平均性能提升 8.5\%。对于 BFS、CC 和 PR 内核，性能相似，因为这些工作负载的热集较小，可以轻松适应快速层内存。图 15 \ref{fig:fre_tracker}展示了仅使用频率追踪器时的性能，1:8 配置下的性能。
+  \begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/fre_tracker.png}
+  \caption{只用频率计数器的对比}
+  \label{fig:fre_tracker}
+  \end{figure}
+  \item 计数布隆过滤器（Counting Bloom Filter）证明了 HybridTier 将每个访问计数器的大小限制为 4 位的设计决策是合理的，因为所有工作负载中超过计数器阈值的页面很少。表 5 显示，64 MB 的 CBF 在 与哈希表进行比较时，超过 99.6\% 的迁移决策是准确的。频率和动量追踪器都使用 CBF 实现。实际上，HybridTier 为动量 CBF 分配的内存比频率 CBF 少 128 倍。
+  \item 分块布隆过滤器（Blocked CBF）k 个计数器可以映射到缓存行内的任何计数器。例如，图 8 显示每个缓存行包含 8 个计数器槽。实际上，4 位 CBF 的每个缓存行包含 128 个计数器槽。与标准 CBF 相比，分块 CBF 有略高的误报率 [61, 63]。然而，在实践中，我们发现性能收益是有利的权衡。
+
+\end{itemize}

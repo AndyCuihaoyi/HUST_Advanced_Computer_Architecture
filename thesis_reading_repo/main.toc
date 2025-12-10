@@ -6,6 +6,17 @@
 \contentsline {subsubsection}{\numberline {1.3.2}Dynamic Data Hotness Distribution}{4}{subsubsection.1.3.2}%
 \contentsline {subsubsection}{\numberline {1.3.3}Prior Tiering Systems}{5}{subsubsection.1.3.3}%
 \contentsline {subsection}{\numberline {1.4}混合层级关键思想}{6}{subsection.1.4}%
-\contentsline {subsection}{\numberline {1.5}混合层级设计}{7}{subsection.1.5}%
-\contentsline {subsection}{\numberline {1.6}实验设计}{7}{subsection.1.6}%
-\contentsline {subsection}{\numberline {1.7}系统评估}{7}{subsection.1.7}%
+\contentsline {subsection}{\numberline {1.5}HybridTier混合层级设计}{7}{subsection.1.5}%
+\contentsline {subsubsection}{\numberline {1.5.1}HybridTier工作流}{7}{subsubsection.1.5.1}%
+\contentsline {subsubsection}{\numberline {1.5.2}计数布隆过滤器设计}{7}{subsubsection.1.5.2}%
+\contentsline {subsubsection}{\numberline {1.5.3}页面迁移策略}{8}{subsubsection.1.5.3}%
+\contentsline {subsubsection}{\numberline {1.5.4}大粒度页面支持}{8}{subsubsection.1.5.4}%
+\contentsline {subsection}{\numberline {1.6}实验设计}{9}{subsection.1.6}%
+\contentsline {subsubsection}{\numberline {1.6.1}CXL 设备部署}{9}{subsubsection.1.6.1}%
+\contentsline {subsubsection}{\numberline {1.6.2}对比方案和实验配置}{9}{subsubsection.1.6.2}%
+\contentsline {subsubsection}{\numberline {1.6.3}工作负载}{9}{subsubsection.1.6.3}%
+\contentsline {subsection}{\numberline {1.7}系统评估}{10}{subsection.1.7}%
+\contentsline {subsubsection}{\numberline {1.7.1}Regular-Page 端到端性能}{10}{subsubsection.1.7.1}%
+\contentsline {subsubsection}{\numberline {1.7.2}Huge-Page 端到端性能}{11}{subsubsection.1.7.2}%
+\contentsline {subsubsection}{\numberline {1.7.3}详细对比Memtis测试}{11}{subsubsection.1.7.3}%
+\contentsline {subsubsection}{\numberline {1.7.4}理解 HybridTier 性能}{12}{subsubsection.1.7.4}%
